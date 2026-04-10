@@ -1,28 +1,14 @@
-# Environment / secrets
-.env
-*.env
-
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-
-# Conda / venv
-.conda/
-venv/
-.venv/
-
-# Generated data
-data/
 uploads/
 frames/
 exports/
-
-# SAM model weights (large binaries)
-*.pth
+data/
+training/checkpoints/
+training/production_model/
+training/evaluation_results/
+training/datasets/
+__pycache__/
+*.pyc
+.env
+*.db
 *.pt
 *.safetensors
-
-# OS
-.DS_Store
-Thumbs.db
