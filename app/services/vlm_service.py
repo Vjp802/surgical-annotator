@@ -17,10 +17,26 @@ from app.config import OLLAMA_BASE_URL, OLLAMA_MODEL, ABDOMINAL_ORGANS
 
 logger = logging.getLogger(__name__)
 
-ORGAN_PROMPT = """You are a surgical anatomy expert reviewing a laparoscopic colorectal surgery image.
-The highlighted region is the organ of interest. Identify it.
-Respond ONLY in this exact JSON format with no other text:
+ORGAN_PROMPT = """You are an expert laparoscopic colorectal surgeon reviewing \
+a surgical image. The highlighted region (colored overlay) is the \
+structure to identify.
+
+Key visual features in laparoscopic views:
+- Liver: large, smooth, dark red-brown, upper right of frame
+- Gallbladder: small, pear-shaped, green-yellow, tucked under liver
+- Colon: tubular, pink-white, haustra folds visible
+- Small intestine: narrower tubes, more mobile, pink
+- Stomach: large smooth organ, upper left
+- Omentum: fatty, lacy yellow tissue
+- Mesentery: thin membrane with visible vessels
+- Surgical instruments: metal/silver, label as unknown
+
+Respond ONLY in this exact JSON format, no other text:
 {"organ": "<organ name>", "confidence": <0.0-1.0>}
+
+If confidence is below 0.5 respond with:
+{"organ": "unknown", "confidence": <actual confidence>}
+
 Choose only from: liver, gallbladder, stomach, spleen, pancreas,
 colon, small_intestine, appendix, kidney, adrenal_gland, omentum,
 mesentery, diaphragm, bladder, uterus, ovary, peritoneum, unknown"""
