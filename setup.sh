@@ -17,19 +17,9 @@ echo "  ✓ Conda environment ready."
 eval "$(conda shell.bash hook)"
 conda activate surgical-annotator
 
-echo "[2/4] Installing SAM 3 from source..."
-SAM3_DIR="/tmp/sam3"
-if [ -d "$SAM3_DIR" ]; then
-    echo "  → SAM 3 repo exists. Pulling latest..."
-    cd "$SAM3_DIR" && git pull --quiet
-else
-    git clone --quiet https://github.com/facebookresearch/sam3.git "$SAM3_DIR"
-    cd "$SAM3_DIR"
-fi
-SAM3_BUILD_CUDA=0 pip install -e . --quiet
-pip install setuptools==69.5.1 einops psutil --quiet
-cd -
-echo "  ✓ SAM 3 installed."
+echo "[2/4] Installing SAM 2 from source..."
+pip install "git+https://github.com/facebookresearch/sam2.git" --quiet
+echo "  ✓ SAM 2 installed."
 
 echo "[3/4] Pulling Gemma 4 via Ollama..."
 if command -v ollama &> /dev/null; then
