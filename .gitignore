@@ -1,0 +1,28 @@
+# Environment / secrets
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Conda / venv
+.conda/
+venv/
+.venv/
+
+# Generated data
+data/
+uploads/
+frames/
+exports/
+
+# SAM model weights (large binaries)
+*.pth
+*.pt
+*.safetensors
+
+# OS
+.DS_Store
+Thumbs.db

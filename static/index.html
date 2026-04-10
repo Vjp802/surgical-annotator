@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Privacy-focused surgical annotation tool with SAM 2 segmentation and AI organ identification for laparoscopic surgery training data.">
+    <title>Surgical Annotator</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<div class="app-layout">
+
+    <!-- ================================================================
+         HEADER
+         ================================================================ -->
+    <header class="header">
+        <div class="header-brand">
+            <span class="logo-icon">🔬</span>
+            <h1>Surgical Annotator</h1>
+            <span class="version-badge">v0.2</span>
+        </div>
+
+        <div class="header-actions">
+            <div class="header-status">
+                <div class="status-indicator">
+                    <span id="status-dot-sam" class="status-dot"></span>
+                    <span>SAM 2</span>
+                </div>
+                <div class="status-indicator">
+                    <span id="status-dot-ollama" class="status-dot"></span>
+                    <span>VLM</span>
+                </div>
+            </div>
+
+            <button id="btn-export" class="btn btn-primary">
+                📦 Export COCO
+            </button>
+        </div>
+    </header>
+
+    <!-- ================================================================
+         LEFT SIDEBAR — Image Library
+         ================================================================ -->
+    <aside class="sidebar sidebar-left">
+        <div class="panel-header">
+            <h2>Images</h2>
+            <span id="image-count" class="count-badge">0</span>
+        </div>
+
+        <div class="panel-body">
+            <!-- Upload zone -->
+            <div id="upload-zone" class="upload-zone">
+                <div class="upload-icon">📁</div>
+                <p>Drop images here or <strong>click to upload</strong></p>
+                <p>.jpg .png .bmp .tiff</p>
+                <input type="file" id="file-input" accept=".jpg,.jpeg,.png,.bmp,.tiff,.tif" multiple>
+            </div>
+
+            <!-- Image list -->
+            <div id="image-list" class="image-list"></div>
+        </div>
+    </aside>
+
+    <!-- ================================================================
+         MAIN CANVAS AREA
+         ================================================================ -->
+    <main id="canvas-area" class="canvas-area">
+
+        <!-- Empty state (shown when no image selected) -->
+        <div id="canvas-empty" class="canvas-empty-state">
+            <div class="empty-icon">🖼️</div>
+            <h3>No image selected</h3>
+            <p>Upload surgical images and select one to begin annotating. Click on an organ to generate a segmentation mask.</p>
+        </div>
+
+        <!-- Image + overlay canvas (hidden until an image is selected) -->
+        <div id="canvas-container" class="canvas-container" style="display: none;">
+            <img id="canvas-image" src="" alt="Surgical image">
+            <canvas id="canvas-overlay" class="canvas-overlay"></canvas>
+
+            <!-- Click markers layer -->
+            <div id="click-markers"></div>
+
+            <!-- Loading overlay -->
+            <div id="loading-overlay" class="loading-overlay">
+                <div class="spinner"></div>
+                <p id="loading-text">Processing...</p>
+            </div>
+        </div>
+
+        <!-- Canvas toolbar (floating bottom bar) -->
+        <div id="canvas-toolbar" class="canvas-toolbar" style="display: none;">
+            <button id="btn-clear-mask" class="btn btn-ghost btn-sm">
+                ✕ Clear <kbd>Esc</kbd>
+            </button>
+
+            <div class="toolbar-divider"></div>
+
+            <button id="btn-identify" class="btn btn-primary btn-sm" disabled>
+                🧠 Identify <kbd>I</kbd>
+            </button>
+
+            <button id="btn-save-annotation" class="btn btn-success btn-sm" disabled>
+                💾 Save <kbd>S</kbd>
+            </button>
+        </div>
+
+    </main>
+
+    <!-- ================================================================
+         RIGHT SIDEBAR — Annotations
+         ================================================================ -->
+    <aside class="sidebar sidebar-right">
+        <div class="panel-header">
+            <h2>Annotations</h2>
+            <span id="annotation-count" class="count-badge">0</span>
+        </div>
+
+        <div id="annotation-list" class="panel-body">
+            <!-- Empty state -->
+            <div id="annotations-empty" class="annotations-empty">
+                <div class="empty-icon">📝</div>
+                <p>No annotations yet.<br>Click on an organ in the image to start segmenting.</p>
+            </div>
+
+            <!-- Annotation cards are injected here by app.js -->
+        </div>
+    </aside>
+
+</div><!-- /.app-layout -->
+
+
+<!-- ====================================================================
+     EXPORT MODAL
+     ==================================================================== -->
+<div id="export-modal" class="modal-backdrop">
+    <div class="modal">
+        <h3>📦 COCO Export</h3>
+        <p id="export-modal-body">Generating export...</p>
+        <div class="modal-actions">
+            <button id="export-modal-close" class="btn btn-ghost">Close</button>
+            <a id="export-modal-download" href="#" download class="btn btn-primary">⬇ Download JSON</a>
+        </div>
+    </div>
+</div>
+
+
+<!-- ====================================================================
+     TOAST CONTAINER
+     ==================================================================== -->
+<div id="toast-container" class="toast-container"></div>
+
+
+<!-- ====================================================================
+     APPLICATION SCRIPT
+     ==================================================================== -->
+<script src="/static/js/app.js"></script>
+
+</body>
+</html>

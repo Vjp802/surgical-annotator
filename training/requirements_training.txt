@@ -1,0 +1,13 @@
+torch
+torchvision
+transformers>=4.40.0
+peft
+accelerate
+datasets
+Pillow
+numpy
+pycocotools
+scikit-learn
+matplotlib
+tqdm
+huggingface_hub
