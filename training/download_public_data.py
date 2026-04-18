@@ -83,9 +83,16 @@ DATASET_INFO: dict[str, dict] = {
         "has_labels": True,
         "label_type": "Pixel-level segmentation, 8 organ classes",
         "procedure": "Colorectal surgery (rectal resection)",
-        "license": "See HuggingFace dataset page",
+        "license": "CC BY 4.0 (see Figshare page)",
         "citation": "Kolbinger et al. (2023)",
         "notes": "BEST dataset for colorectal surgery fine-tuning",
+        "download_source": "Kaggle: anindyamajumder/the-dresden-surgical-anatomy-dataset",
+        "alternative": (
+            "Manual download from https://springernature.figshare.com/articles/dataset/"
+            "The_Dresden_Surgical_Anatomy_Dataset_for_abdominal_organ_segmentation_in_"
+            "surgical_data_science/21702600"
+        ),
+        "requires": "kaggle CLI (pip install kaggle) + KAGGLE_USERNAME + KAGGLE_KEY env vars",
     },
 }
 
@@ -379,165 +386,289 @@ def download_surgisr4k(output_dir: str, max_samples: int = 2000) -> str:
 
 def download_dsad(output_dir: str, max_samples: int = 2000) -> str:
     """
-    Download Dresden Surgical Anatomy Dataset (DSAD).
+    Download Dresden Surgical Anatomy Dataset (DSAD) via the Kaggle CLI.
 
-    Source: https://huggingface.co/datasets/dsad/dsad
-    Contains 13,195 laparoscopic images from robot-assisted rectal resections
-    with pixel-level segmentation of: colon, small intestine, liver, spleen,
-    kidney, ureter, abdominal wall, and vascular structures.
+    DSAD is hosted on Kaggle (and Figshare) — NOT on HuggingFace.
+    Kaggle dataset: anindyamajumder/the-dresden-surgical-anatomy-dataset
+    Figshare page:  https://springernature.figshare.com/articles/dataset/
+                    The_Dresden_Surgical_Anatomy_Dataset_for_abdominal_organ_
+                    segmentation_in_surgical_data_science/21702600
 
-    This is the most relevant public dataset for colorectal surgery organ
-    segmentation — directly matches the anatomy visible in colorectal
-    laparoscopic procedures.
+    Prerequisites:
+        pip install kaggle
+        Set KAGGLE_USERNAME and KAGGLE_KEY environment variables
+        (download kaggle.json from https://www.kaggle.com/settings/account
+         and run: export KAGGLE_USERNAME=... KAGGLE_KEY=...)
+
+    On-disk structure after unzip:
+        raw/
+          colon/
+            surgery_01/
+              frame_001.png          ← image
+              frame_001_mask.png     ← binary segmentation mask
+          liver/
+            surgery_01/...
+          ...
 
     Args:
-        output_dir:  Directory to save downloaded data.
-        max_samples: Maximum images to download (default 2000; DSAD has 13 195).
+        output_dir:  Root directory to save downloaded data.
+        max_samples: Maximum images to process across all organs (default 2000).
 
     Returns:
-        Path to the output COCO JSON.
+        Path to the output COCO JSON, or empty string on failure.
     """
+    import subprocess
+    import zipfile
+    import glob
     import numpy as np
+    import cv2
     from PIL import Image
     from tqdm import tqdm
     from datetime import datetime
-    from datasets import load_dataset
 
-    print(f"Downloading DSAD dataset (max {max_samples} samples)...")
+    dsad_dir   = os.path.join(output_dir, "dsad")
+    images_dir = os.path.join(dsad_dir, "images")
+    raw_dir    = os.path.join(dsad_dir, "raw")
+    os.makedirs(images_dir, exist_ok=True)
 
-    # Load from HuggingFace — streaming keeps RAM usage flat
-    dataset = load_dataset(
-        "dsad/dsad",
-        split="train",
-        streaming=True,
-        trust_remote_code=True,
-    )
+    # ------------------------------------------------------------------
+    # Step 1: Download from Kaggle if not already present
+    # ------------------------------------------------------------------
+    already_have_raw = os.path.isdir(raw_dir) and any(os.scandir(raw_dir))
+    already_have_zip = bool(glob.glob(os.path.join(dsad_dir, "*.zip")))
 
-    # DSAD organ label mapping → our ABDOMINAL_ORGANS list
-    DSAD_LABEL_MAP: dict[str, str] = {
-        "colon": "colon",
-        "small_intestine": "small_intestine",
-        "small intestine": "small_intestine",
-        "liver": "liver",
-        "spleen": "spleen",
-        "kidney": "kidney",
-        "ureter": "unknown",          # not in our list
-        "abdominal_wall": "unknown",
-        "abdominal wall": "unknown",
-        "inferior_mesenteric_artery": "unknown",
-        "superior_rectal_artery": "unknown",
+    if not already_have_raw and not already_have_zip:
+        print("Downloading DSAD from Kaggle...")
+        print("  Dataset : anindyamajumder/the-dresden-surgical-anatomy-dataset")
+        print("  Requires: kaggle CLI  +  KAGGLE_USERNAME / KAGGLE_KEY env vars")
+        print("  Get API key: https://www.kaggle.com/settings/account\n")
+
+        result = subprocess.run(
+            [
+                "kaggle", "datasets", "download",
+                "anindyamajumder/the-dresden-surgical-anatomy-dataset",
+                "--path", dsad_dir,
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode != 0:
+            print(f"\n✗ Kaggle download failed:\n{result.stderr.strip()}")
+            print("\nManual download options:")
+            print("  Kaggle  : https://www.kaggle.com/datasets/anindyamajumder/"
+                  "the-dresden-surgical-anatomy-dataset")
+            print("  Figshare: https://springernature.figshare.com/articles/dataset/"
+                  "The_Dresden_Surgical_Anatomy_Dataset_for_abdominal_organ_"
+                  "segmentation_in_surgical_data_science/21702600")
+            print(f"  Unzip to: {dsad_dir}/raw/")
+            print("  Then re-run this script.")
+            return ""
+
+        print(result.stdout.strip())
+
+    # ------------------------------------------------------------------
+    # Step 2: Unzip if we have a zip but not the raw dir yet
+    # ------------------------------------------------------------------
+    if not (os.path.isdir(raw_dir) and any(os.scandir(raw_dir))):
+        zip_files = glob.glob(os.path.join(dsad_dir, "*.zip"))
+        if not zip_files:
+            print("No zip file found in", dsad_dir)
+            print("Please download DSAD manually and unzip it to:", raw_dir)
+            return ""
+
+        print(f"Unzipping {os.path.basename(zip_files[0])}...")
+        os.makedirs(raw_dir, exist_ok=True)
+        with zipfile.ZipFile(zip_files[0], "r") as zf:
+            zf.extractall(raw_dir)
+        print(f"  Extracted to {raw_dir}")
+
+    # ------------------------------------------------------------------
+    # Step 3: Walk organ folders and convert to COCO format
+    # ------------------------------------------------------------------
+    # Map each DSAD folder name → our canonical organ label
+    DSAD_ORGAN_MAP: dict[str, str] = {
+        "colon":                       "colon",
+        "liver":                       "liver",
+        "small_intestine":             "small_intestine",
+        "spleen":                      "spleen",
+        "stomach":                     "stomach",
+        "pancreas":                    "pancreas",
+        "kidney":                      "kidney",
+        "ureter":                      "unknown",
+        "abdominal_wall":              "unknown",
+        "inferior_mesenteric_artery":  "unknown",
+        "intestinal_veins":            "unknown",
+        "vesicular_glands":            "unknown",
     }
 
-    images_dir = os.path.join(output_dir, "dsad", "images")
-    masks_dir  = os.path.join(output_dir, "dsad", "masks")
-    os.makedirs(images_dir, exist_ok=True)
-    os.makedirs(masks_dir,  exist_ok=True)
+    # The actual organ folders may sit one level deep inside raw_dir,
+    # so find the first level that contains known organ folder names.
+    def _find_organ_root(base: str) -> str:
+        """Return the directory that directly contains organ sub-folders."""
+        for root, dirs, _ in os.walk(base):
+            if any(d in DSAD_ORGAN_MAP for d in dirs):
+                return root
+        return base  # fallback — try base itself
 
-    coco_images: list[dict]       = []
-    coco_annotations: list[dict]  = []
-    annotation_id                 = 0
-    skipped                       = 0
+    organ_root = _find_organ_root(raw_dir)
+    print(f"Reading organ folders from: {organ_root}")
 
-    for idx, sample in enumerate(tqdm(dataset, total=max_samples)):
-        if idx >= max_samples:
+    coco_images: list[dict]      = []
+    coco_annotations: list[dict] = []
+    annotation_id                = 0
+    total_processed              = 0
+    skipped                      = 0
+
+    organ_items = [
+        (organ_folder, organ_label)
+        for organ_folder, organ_label in DSAD_ORGAN_MAP.items()
+        if os.path.isdir(os.path.join(organ_root, organ_folder))
+    ]
+
+    if not organ_items:
+        print("\n⚠ No recognised organ folders found under:", organ_root)
+        print("Expected folders like: colon/, liver/, small_intestine/, ...")
+        print("Please check the DSAD zip structure and re-run.")
+        return ""
+
+    pbar = tqdm(total=max_samples, desc="Processing DSAD")
+
+    for organ_folder, organ_label in organ_items:
+        if total_processed >= max_samples:
             break
 
-        try:
-            image       = sample.get("image")
-            segmentation = sample.get("segmentation") or sample.get("mask")
-            label       = sample.get("label") or sample.get("organ")
+        organ_path = os.path.join(organ_root, organ_folder)
 
-            if image is None:
-                skipped += 1
-                continue
+        # Iterate surgery sub-directories (surgery_01, surgery_02, …)
+        surgery_dirs = sorted(
+            d for d in os.listdir(organ_path)
+            if os.path.isdir(os.path.join(organ_path, d))
+        )
 
-            # --- Save image ---
-            filename = f"dsad_{idx:06d}.jpg"
-            filepath = os.path.join(images_dir, filename)
-            if not os.path.exists(filepath):
-                image.convert("RGB").save(filepath, "JPEG", quality=95)
+        for surgery_dir in surgery_dirs:
+            if total_processed >= max_samples:
+                break
 
-            # --- Map DSAD label → our organ vocabulary ---
-            organ_label = "unknown"
-            if label:
-                label_str  = str(label).lower().strip()
-                organ_label = DSAD_LABEL_MAP.get(label_str, "unknown")
+            surgery_path = os.path.join(organ_path, surgery_dir)
 
-            # --- Convert segmentation mask → COCO polygon format ---
-            if segmentation is not None:
-                mask_array = np.array(segmentation)
-                if mask_array.ndim == 3:
-                    # Some HuggingFace masks are (H, W, 1) — squeeze
-                    mask_array = mask_array.squeeze(-1)
+            # Collect image files (PNG/JPG, excluding mask files)
+            all_files = sorted(os.listdir(surgery_path))
+            image_files = [
+                f for f in all_files
+                if f.lower().endswith((".png", ".jpg", ".jpeg"))
+                and "mask" not in f.lower()
+            ]
 
-                if mask_array.max() > 0:
-                    # Bounding box from mask
-                    rows = np.any(mask_array, axis=1)
-                    cols = np.any(mask_array, axis=0)
-                    rmin, rmax = int(np.where(rows)[0][0]),  int(np.where(rows)[0][-1])
-                    cmin, cmax = int(np.where(cols)[0][0]),  int(np.where(cols)[0][-1])
-                    bbox  = [cmin, rmin, cmax - cmin, rmax - rmin]
-                    area  = float(mask_array.sum())
+            for img_file in image_files:
+                if total_processed >= max_samples:
+                    break
 
-                    # Polygon contours via OpenCV
-                    import cv2
-                    contours, _ = cv2.findContours(
-                        mask_array.astype(np.uint8),
-                        cv2.RETR_EXTERNAL,
-                        cv2.CHAIN_APPROX_SIMPLE,
+                img_path = os.path.join(surgery_path, img_file)
+
+                # Convention: frame_001.png → frame_001_mask.png
+                stem     = os.path.splitext(img_file)[0]
+                ext      = os.path.splitext(img_file)[1]
+                mask_file = f"{stem}_mask.png"
+                mask_path = os.path.join(surgery_path, mask_file)
+                # Also try same extension
+                if not os.path.exists(mask_path):
+                    mask_path = os.path.join(surgery_path, f"{stem}_mask{ext}")
+
+                try:
+                    image    = Image.open(img_path).convert("RGB")
+                    img_id   = total_processed
+                    filename = (
+                        f"dsad_{organ_folder}_{surgery_dir}_{total_processed:06d}.jpg"
                     )
-                    segmentation_poly: list[list[float]] = []
-                    for contour in contours:
-                        if len(contour) >= 3:
-                            poly = contour.flatten().tolist()
-                            if len(poly) >= 6:
-                                segmentation_poly.append(poly)
+                    out_path = os.path.join(images_dir, filename)
 
-                    if segmentation_poly:
-                        # Resolve category_id; fall back to last category if unknown
-                        if organ_label in ABDOMINAL_ORGANS:
-                            cat_id = ABDOMINAL_ORGANS.index(organ_label) + 1
-                        else:
-                            cat_id = len(ABDOMINAL_ORGANS)
+                    if not os.path.exists(out_path):
+                        image.save(out_path, "JPEG", quality=95)
 
-                        coco_annotations.append({
-                            "id":            annotation_id,
-                            "image_id":      idx,
-                            "category_id":   cat_id,
-                            "segmentation":  segmentation_poly,
-                            "area":          area,
-                            "bbox":          bbox,
-                            "iscrowd":       0,
-                            "organ":         organ_label,
-                            "source":        "dsad",
-                            "approved":      True,   # expert pixel-level labels
-                        })
-                        annotation_id += 1
+                    coco_images.append({
+                        "id":       img_id,
+                        "file_name": filename,
+                        "width":    image.width,
+                        "height":   image.height,
+                        "source":   "dsad",
+                        "organ":    organ_label,
+                        "surgery":  surgery_dir,
+                    })
 
-            coco_images.append({
-                "id":        idx,
-                "file_name": filename,
-                "width":     image.width,
-                "height":    image.height,
-                "source":    "dsad",
-            })
+                    # --- Mask → COCO polygon ---
+                    if os.path.exists(mask_path) and organ_label != "unknown":
+                        mask_img    = Image.open(mask_path).convert("L")
+                        mask_binary = (np.array(mask_img) > 127).astype(np.uint8)
 
-        except Exception as e:
-            print(f"  Skipping sample {idx}: {e}")
-            skipped += 1
-            continue
+                        if mask_binary.sum() > 0:
+                            contours, _ = cv2.findContours(
+                                mask_binary,
+                                cv2.RETR_EXTERNAL,
+                                cv2.CHAIN_APPROX_SIMPLE,
+                            )
+                            polys: list[list[float]] = []
+                            for c in contours:
+                                if len(c) >= 3:
+                                    poly = c.flatten().tolist()
+                                    if len(poly) >= 6:
+                                        polys.append(poly)
 
-    # --- Build & save COCO JSON ---
+                            if polys:
+                                rows = np.any(mask_binary, axis=1)
+                                cols = np.any(mask_binary, axis=0)
+                                rmin = int(np.where(rows)[0][0])
+                                rmax = int(np.where(rows)[0][-1])
+                                cmin = int(np.where(cols)[0][0])
+                                cmax = int(np.where(cols)[0][-1])
+
+                                cat_id = (
+                                    ABDOMINAL_ORGANS.index(organ_label) + 1
+                                    if organ_label in ABDOMINAL_ORGANS
+                                    else len(ABDOMINAL_ORGANS)
+                                )
+
+                                coco_annotations.append({
+                                    "id":           annotation_id,
+                                    "image_id":     img_id,
+                                    "category_id":  cat_id,
+                                    "segmentation": polys,
+                                    "area":         float(mask_binary.sum()),
+                                    "bbox":         [cmin, rmin,
+                                                     cmax - cmin, rmax - rmin],
+                                    "iscrowd":      0,
+                                    "organ":        organ_label,
+                                    "source":       "dsad",
+                                    "approved":     True,  # expert pixel-level labels
+                                })
+                                annotation_id += 1
+
+                    total_processed += 1
+                    pbar.update(1)
+
+                except Exception as e:
+                    print(f"  Skipping {img_file}: {e}")
+                    skipped += 1
+
+    pbar.close()
+
+    # ------------------------------------------------------------------
+    # Step 4: Build & save COCO JSON + metadata
+    # ------------------------------------------------------------------
     coco = {
         "info": {
             "description":     "Dresden Surgical Anatomy Dataset (DSAD)",
-            "source":          "dsad/dsad",
-            "url":             "https://huggingface.co/datasets/dsad/dsad",
+            "source":          "Kaggle: anindyamajumder/the-dresden-surgical-anatomy-dataset",
+            "url":             "https://www.kaggle.com/datasets/anindyamajumder/"
+                               "the-dresden-surgical-anatomy-dataset",
+            "figshare_url":    "https://springernature.figshare.com/articles/dataset/"
+                               "The_Dresden_Surgical_Anatomy_Dataset_for_abdominal_organ_"
+                               "segmentation_in_surgical_data_science/21702600",
             "version":         "1.0",
             "year":            2023,
             "contributor":     "Kolbinger et al., Dresden University of Technology",
             "date_downloaded": datetime.now().isoformat(),
-            "license":         "See dataset page for license details",
+            "license":         "CC BY 4.0",
             "citation":        "Kolbinger et al. (2023)",
             "procedure":       "Robot-assisted rectal resection (colorectal surgery)",
             "notes":           "Expert pixel-level segmentation, approved=True",
@@ -551,20 +682,21 @@ def download_dsad(output_dir: str, max_samples: int = 2000) -> str:
         ],
     }
 
-    coco_path = os.path.join(output_dir, "dsad", "annotations.json")
+    coco_path = os.path.join(dsad_dir, "annotations.json")
     _save_json(coco, coco_path)
 
     _save_metadata(
-        path=os.path.join(output_dir, "dsad", "metadata.json"),
+        path=os.path.join(dsad_dir, "metadata.json"),
         dataset="DSAD",
-        source="dsad/dsad",
+        source="Kaggle: anindyamajumder/the-dresden-surgical-anatomy-dataset",
         total_downloaded=len(coco_images),
         total_annotations=len(coco_annotations),
         total_skipped=skipped,
         has_organ_labels=True,
         approved=True,
         procedure="Robot-assisted rectal resection",
-        organs_covered=["colon", "small_intestine", "liver", "spleen", "kidney"],
+        organs_covered=["colon", "small_intestine", "liver", "spleen",
+                        "kidney", "stomach", "pancreas"],
         citation="Kolbinger et al. (2023)",
         coco_json=coco_path,
     )
