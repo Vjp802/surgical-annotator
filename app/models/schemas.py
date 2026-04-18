@@ -60,6 +60,8 @@ class IdentifyRequest(BaseModel):
 class IdentifyResponse(BaseModel):
     label: str
     confidence: float = Field(..., ge=0.0, le=1.0)
+    spatial_context: Optional[str] = None
+    average_depth: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +83,7 @@ class AnnotationCreate(BaseModel):
     approved: bool = False
     corrected: bool = False
     track_id: Optional[str] = None
+    average_depth: Optional[float] = None
 
 
 class TrackAnnotationFrame(BaseModel):
@@ -89,6 +92,7 @@ class TrackAnnotationFrame(BaseModel):
     mask_polygon: Optional[list] = None
     bbox: Optional[list] = None
     area: float = 0.0
+    average_depth: Optional[float] = None
 
 
 class AnnotationTrackCreate(BaseModel):

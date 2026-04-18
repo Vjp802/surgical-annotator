@@ -23,6 +23,7 @@ from app.routers import annotations, export, identify, segment, upload
 from app.services.sam_service import SAMService
 from app.services.video_service import VideoService
 from app.services.coco_export import COCOExporter
+from app.services.depth_service import DepthService
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -49,7 +50,7 @@ async def lifespan(app: FastAPI):
     logger.info("  ✓ Directories ready.")
 
     # 2. Database
-    init_db()
+    await init_db()
     logger.info("  ✓ Database ready.")
 
     # 3. SAM 2 (image + video predictors)
@@ -68,7 +69,7 @@ async def lifespan(app: FastAPI):
     logger.info("  ✓ Video service ready.")
 
     # 5. VLM backend selection
-    if IS_HF_SPACES:
+    if IS_HF_SPACES and VLM_BACKEND not in ("robotics_er",):
         logger.info("  HF Spaces detected — using HuggingFace VLM backend.")
         from app.services.vlm_service_hf import VLMService
         _vlm_label = "HuggingFace"
@@ -76,8 +77,14 @@ async def lifespan(app: FastAPI):
         logger.info("  VLM_BACKEND=finetuned — using local fine-tuned PaliGemma 2.")
         from app.services.vlm_service_finetuned import VLMService
         _vlm_label = "finetuned (PaliGemma 2)"
+    elif VLM_BACKEND == "robotics_er":
+        logger.info("  VLM_BACKEND=robotics_er — using Gemini Robotics-ER 1.6.")
+        from app.services.vlm_service_robotics import VLMService
+        _vlm_label = "Gemini Robotics-ER 1.6"
     else:
-        logger.info("  VLM_BACKEND=ollama — using local Ollama (%s).", OLLAMA_MODEL)
+        # Both "ollama" and "medgemma" use vlm_service.py
+        # OLLAMA_MODEL in config already resolves to correct model
+        logger.info("  VLM_BACKEND=%s — using local Ollama (%s).", VLM_BACKEND, OLLAMA_MODEL)
         from app.services.vlm_service import VLMService
         _vlm_label = f"Ollama ({OLLAMA_MODEL})"
 
@@ -92,10 +99,20 @@ async def lifespan(app: FastAPI):
     app.state.coco_exporter = COCOExporter()
     logger.info("  ✓ COCO exporter ready.")
 
+    # 7. Depth Estimator (Optional)
+    depth_service = DepthService()
+    depth_service.load_model()
+    app.state.depth_service = depth_service
+    if depth_service.is_ready():
+        logger.info("  ✓ Depth service loaded (DPT enabled).")
+    else:
+        logger.info("  - Depth service disabled or not active.")
+
     logger.info("=" * 60)
     logger.info("  Startup complete — device: %s", DEVICE)
     logger.info("  SAM 2:   %s", "loaded" if sam_service.is_ready() else "FAILED")
     logger.info("  VLM:     %s", "available" if vlm_service.is_available() else "unavailable")
+    logger.info("  Depth:   %s", "enabled" if depth_service.is_ready() else "disabled")
     logger.info("  DB:      ready")
     logger.info("=" * 60)
 
@@ -114,6 +131,31 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+# ---------------------------------------------------------------------------
+# Global Exception Handlers
+# ---------------------------------------------------------------------------
+from fastapi.responses import JSONResponse
+import traceback
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception on {request.url.path}: {exc}")
+    logger.error(traceback.format_exc())
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal server error occurred.", "error": str(exc)},
+    )
+
+from sqlalchemy.exc import SQLAlchemyError
+@app.exception_handler(SQLAlchemyError)
+async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
+    logger.error(f"Database error on {request.url.path}: {exc}")
+    # Don't leak raw SQL queries to the client
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "A database error occurred."},
+    )
 
 # ---------------------------------------------------------------------------
 # Security headers middleware
@@ -135,6 +177,8 @@ app.include_router(segment.router)
 app.include_router(identify.router)
 app.include_router(annotations.router)
 app.include_router(export.router)
+from app.routers import depth
+app.include_router(depth.router)
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +213,11 @@ async def health(request: Request):
         "hf_spaces": IS_HF_SPACES,
         "services": {
             "sam2": {"ready": sam_ready, "image_model": SAM_IMAGE_MODEL_ID, "video_model": SAM_VIDEO_MODEL_ID},
-            "vlm": {"available": vlm_ok, "backend": "huggingface" if IS_HF_SPACES else VLM_BACKEND},
+            "vlm": {
+                "available": vlm_ok, 
+                "backend": "huggingface" if IS_HF_SPACES else VLM_BACKEND,
+                "model": OLLAMA_MODEL if VLM_BACKEND in ("ollama", "medgemma") else "default"
+            },
             "db": {"ready": True},
         },
     }

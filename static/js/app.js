@@ -38,7 +38,7 @@ const state = {
     currentImage: null,       // { id, filename, url, width, height, ... }
     annotations: [],          // annotations for current image
     pendingMask: null,        // { mask_png_b64, mask_rle, mask_polygon, bbox, area, score, click_x, click_y }
-    pendingLabel: null,       // { label, confidence }
+    pendingLabel: null,       // { label, confidence, spatial_context }
     isSegmenting: false,
     isIdentifying: false,
 };
@@ -420,10 +420,12 @@ async function runIdentification() {
         state.pendingLabel = {
             label: result.label,
             confidence: result.confidence,
+            spatial_context: result.spatial_context,
         };
 
+        const ctxStr = result.spatial_context ? `\nContext: ${result.spatial_context}` : '';
         showToast(
-            `Identified: ${result.label} (${(result.confidence * 100).toFixed(0)}% confidence)`,
+            `Identified: ${result.label} (${(result.confidence * 100).toFixed(0)}% confidence)${ctxStr}`,
             result.confidence >= 0.7 ? 'success' : 'warning'
         );
     } catch (err) {

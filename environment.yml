@@ -22,3 +22,11 @@ dependencies:
     - opencv-python
     - huggingface_hub
     - tqdm
+    - google-generativeai>=0.8.0
+    - timm
+    - pydantic-settings
+    - sqlalchemy
+    - aiosqlite
+    - pytest
+    - httpx
+    - pytest-asyncio

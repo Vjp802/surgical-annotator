@@ -128,13 +128,17 @@ class SurgicalOrganDataset(Dataset):
             if p.exists():
                 return p
 
-        # Fallback: search images_dir by original filename
+        # Fallback: search images_dir by original filename or file_path basename
         file_name = info.get("file_name", "")
-        for candidate in [
+        candidates = [
             images_dir / file_name,
             images_dir / "images" / file_name,
-            Path(file_name),
-        ]:
+            Path(file_name)
+        ]
+        if info.get("file_path"):
+            candidates.append(images_dir / Path(info["file_path"]).name)
+
+        for candidate in candidates:
             if candidate.exists():
                 return candidate
 
@@ -229,6 +233,10 @@ class SurgicalOrganDataset(Dataset):
             logger.warning(
                 "Stratified split failed (some classes too small). Using random split."
             )
+            if len(indices) < 5:
+                logger.warning("Dataset too small for proper splitting. Reusing data across splits for testing purposes.")
+                return Subset(self, indices), Subset(self, indices), Subset(self, indices)
+
             train_idx, temp_idx = train_test_split(
                 indices, test_size=1 - train_ratio, random_state=seed
             )

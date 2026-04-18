@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api", tags=["export"])
 async def export_coco(data: ExportRequest, request: Request):
     """Generate COCO JSON from approved annotations (images + video)."""
     exporter = request.app.state.coco_exporter
-    result = exporter.export(description=data.description, version=data.version)
+    result = await exporter.export(description=data.description, version=data.version)
     return {
         "status": "success",
         "filename": result["filename"],

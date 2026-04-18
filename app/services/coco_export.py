@@ -30,7 +30,7 @@ class COCOExporter:
             })
             self.category_name_to_id[organ] = cat_id
 
-    def export(
+    async def export(
         self,
         description: str = "Surgical annotation dataset",
         version: str = "1.0",
@@ -40,7 +40,7 @@ class COCOExporter:
         Build COCO JSON from all approved annotations and save to exports/.
         Supports both standalone images and video frames.
         """
-        approved = get_approved_annotations()
+        approved = await get_approved_annotations()
 
         # --- Images section ---
         image_id_map = {}   # unique key → COCO integer image ID

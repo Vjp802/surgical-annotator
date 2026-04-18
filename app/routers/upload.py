@@ -53,7 +53,7 @@ async def upload_image(file: UploadFile = File(...)):
         filepath.unlink(missing_ok=True)
         raise HTTPException(400, "Invalid image file.")
 
-    record = create_image(file.filename, str(filepath), width, height)
+    record = await create_image(file.filename, str(filepath), width, height)
     record["url"] = f"/uploads/images/{unique_name}"
 
     return {"status": "success", "image": record}
@@ -62,7 +62,7 @@ async def upload_image(file: UploadFile = File(...)):
 @router.get("/images")
 async def get_images():
     """List all uploaded images."""
-    images = list_images()
+    images = await list_images()
     for img in images:
         img["url"] = f"/uploads/images/{Path(img['filepath']).name}"
     return {"images": images, "count": len(images)}
@@ -71,7 +71,7 @@ async def get_images():
 @router.get("/images/{image_id}")
 async def serve_image(image_id: str):
     """Serve an image file by ID."""
-    record = get_image(image_id)
+    record = await get_image(image_id)
     if not record:
         raise HTTPException(404, "Image not found.")
     fp = Path(record["filepath"])
@@ -107,7 +107,7 @@ async def upload_video(file: UploadFile = File(...), request: Request = None):
     meta = video_service.get_video_metadata(str(filepath))
 
     # Create video DB record
-    record = create_video(
+    record = await create_video(
         filename=file.filename,
         filepath=str(filepath),
         duration_seconds=meta["duration_seconds"],
@@ -120,7 +120,8 @@ async def upload_video(file: UploadFile = File(...), request: Request = None):
 
     # Extract frames
     frames_dir = Path(FRAMES_DIR) / video_id
-    frames = video_service.extract_frames(str(filepath), str(frames_dir))
+    from starlette.concurrency import run_in_threadpool
+    frames = await run_in_threadpool(video_service.extract_frames, str(filepath), str(frames_dir))
 
     # Bulk-insert frame records
     import uuid as _uuid
@@ -135,7 +136,7 @@ async def upload_video(file: UploadFile = File(...), request: Request = None):
         })
 
     if frame_rows:
-        create_video_frames_bulk(frame_rows)
+        await create_video_frames_bulk(frame_rows)
 
     return {
         "status": "success",
@@ -147,14 +148,14 @@ async def upload_video(file: UploadFile = File(...), request: Request = None):
 @router.get("/videos")
 async def get_videos():
     """List all uploaded videos."""
-    videos = list_videos()
+    videos = await list_videos()
     return {"videos": videos, "count": len(videos)}
 
 
 @router.get("/videos/{video_id}/frame/{frame_number}")
 async def serve_video_frame(video_id: str, frame_number: int):
     """Serve a specific extracted video frame as JPEG."""
-    frame = get_video_frame(video_id, frame_number)
+    frame = await get_video_frame(video_id, frame_number)
     if not frame:
         raise HTTPException(404, "Frame not found.")
     fp = Path(frame["filepath"])

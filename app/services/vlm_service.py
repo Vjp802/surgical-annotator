@@ -13,33 +13,53 @@ import numpy as np
 import requests
 from PIL import Image
 
-from app.config import OLLAMA_BASE_URL, OLLAMA_MODEL, ABDOMINAL_ORGANS
+from app.config import OLLAMA_BASE_URL, OLLAMA_MODEL, ABDOMINAL_ORGANS, VLM_BACKEND
 
 logger = logging.getLogger(__name__)
 
-ORGAN_PROMPT = """You are an expert laparoscopic colorectal surgeon reviewing \
-a surgical image. The highlighted region (colored overlay) is the \
-structure to identify.
+PROMPT_GENERAL = """You are a surgical anatomy expert reviewing a 
+laparoscopic colorectal surgery image. The highlighted region 
+(colored overlay) is the organ of interest. Identify it.
 
 Key visual features in laparoscopic views:
-- Liver: large, smooth, dark red-brown, upper right of frame
-- Gallbladder: small, pear-shaped, green-yellow, tucked under liver
-- Colon: tubular, pink-white, haustra folds visible
-- Small intestine: narrower tubes, more mobile, pink
-- Stomach: large smooth organ, upper left
-- Omentum: fatty, lacy yellow tissue
+- Liver: large smooth dark red-brown, upper right of frame
+- Gallbladder: small pear-shaped green-yellow, tucked under liver
+- Colon: tubular pink-white with haustra folds
+- Small intestine: narrower pink tubes, more mobile
+- Stomach: large smooth organ upper left
+- Omentum: fatty lacy yellow tissue
 - Mesentery: thin membrane with visible vessels
 - Surgical instruments: metal/silver, label as unknown
 
 Respond ONLY in this exact JSON format, no other text:
 {"organ": "<organ name>", "confidence": <0.0-1.0>}
-
-If confidence is below 0.5 respond with:
-{"organ": "unknown", "confidence": <actual confidence>}
-
+If confidence below 0.5 use organ: "unknown".
 Choose only from: liver, gallbladder, stomach, spleen, pancreas,
 colon, small_intestine, appendix, kidney, adrenal_gland, omentum,
 mesentery, diaphragm, bladder, uterus, ovary, peritoneum, unknown"""
+
+PROMPT_MEDGEMMA = """You are analyzing a laparoscopic colorectal 
+surgery image. This is an intraoperative view through a 
+laparoscopic camera during colorectal surgery.
+
+The highlighted region (colored overlay) is the anatomical 
+structure to identify. Use your medical knowledge of surgical 
+anatomy to identify this structure.
+
+Consider:
+- Intraoperative appearance differs from textbook anatomy
+- Laparoscopic lighting creates specular highlights on moist tissue
+- Tissue may be retracted or partially obscured by instruments
+- Color, texture, vascularity, and position are key identifiers
+
+Respond ONLY in this exact JSON format, no other text:
+{"organ": "<organ name>", "confidence": <0.0-1.0>}
+If confidence is below 0.5 respond with organ: "unknown".
+Choose only from: liver, gallbladder, stomach, spleen, pancreas,
+colon, small_intestine, appendix, kidney, adrenal_gland, omentum,
+mesentery, diaphragm, bladder, uterus, ovary, peritoneum, unknown"""
+
+ORGAN_PROMPT = PROMPT_MEDGEMMA if VLM_BACKEND == "medgemma" else PROMPT_GENERAL
 
 
 class VLMService:

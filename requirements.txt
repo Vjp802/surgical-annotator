@@ -1,0 +1,18 @@
+# Core API
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic-settings
+
+# Database
+sqlalchemy
+aiosqlite
+greenlet
+
+# Testing
+pytest
+httpx
+pytest-asyncio
+
+# Gemini Robotics-ER VLM backend
+google-generativeai>=0.8.0

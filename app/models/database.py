@@ -1,274 +1,225 @@
 """
 Surgical Annotator — Database Layer
-SQLite with images, videos, video_frames, and annotations tables.
+Async SQLAlchemy with images, videos, video_frames, and annotations tables.
 """
 
-import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
+
+from sqlalchemy import Integer, String, Float, ForeignKey, Index, func
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.sql import select, delete, update
+from sqlalchemy.sql.expression import text
 
 from app.config import DB_PATH
 
+Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+DATABASE_URL = f"sqlite+aiosqlite:///{DB_PATH}"
 
-# ---------------------------------------------------------------------------
-# Connection helpers
-# ---------------------------------------------------------------------------
+engine = create_async_engine(
+    DATABASE_URL, 
+    echo=False,
+    connect_args={"check_same_thread": False, "timeout": 15}
+)
+AsyncSessionLocal = async_sessionmaker(
+    bind=engine, 
+    expire_on_commit=False,
+    autoflush=False
+)
 
-def _get_connection() -> sqlite3.Connection:
-    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
-
-
-def get_db() -> sqlite3.Connection:
-    return _get_connection()
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
+class Base(DeclarativeBase):
+    pass
 
 def _uuid() -> str:
     return str(uuid.uuid4())
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-# ---------------------------------------------------------------------------
-# Schema creation
-# ---------------------------------------------------------------------------
+# ===================================================================
+# Models
+# ===================================================================
 
-def init_db() -> None:
-    conn = _get_connection()
-    try:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS images (
-                id          TEXT PRIMARY KEY,
-                filename    TEXT NOT NULL,
-                filepath    TEXT NOT NULL,
-                width       INTEGER NOT NULL,
-                height      INTEGER NOT NULL,
-                uploaded_at TEXT NOT NULL
-            );
+class ImageModel(Base):
+    __tablename__ = "images"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    filename: Mapped[str] = mapped_column(String, nullable=False)
+    filepath: Mapped[str] = mapped_column(String, nullable=False)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    uploaded_at: Mapped[str] = mapped_column(String, default=_now)
 
-            CREATE TABLE IF NOT EXISTS videos (
-                id               TEXT PRIMARY KEY,
-                filename         TEXT NOT NULL,
-                filepath         TEXT NOT NULL,
-                duration_seconds REAL,
-                fps              REAL,
-                total_frames     INTEGER,
-                width            INTEGER,
-                height           INTEGER,
-                uploaded_at      TEXT NOT NULL
-            );
+class VideoModel(Base):
+    __tablename__ = "videos"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    filename: Mapped[str] = mapped_column(String, nullable=False)
+    filepath: Mapped[str] = mapped_column(String, nullable=False)
+    duration_seconds: Mapped[Optional[float]] = mapped_column(Float)
+    fps: Mapped[Optional[float]] = mapped_column(Float)
+    total_frames: Mapped[Optional[int]] = mapped_column(Integer)
+    width: Mapped[Optional[int]] = mapped_column(Integer)
+    height: Mapped[Optional[int]] = mapped_column(Integer)
+    uploaded_at: Mapped[str] = mapped_column(String, default=_now)
 
-            CREATE TABLE IF NOT EXISTS video_frames (
-                id           TEXT PRIMARY KEY,
-                video_id     TEXT NOT NULL,
-                frame_number INTEGER NOT NULL,
-                timestamp_ms REAL,
-                filepath     TEXT NOT NULL,
-                FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
-            );
+class VideoFrameModel(Base):
+    __tablename__ = "video_frames"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    video_id: Mapped[str] = mapped_column(String, ForeignKey("videos.id", ondelete="CASCADE"), nullable=False)
+    frame_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    timestamp_ms: Mapped[Optional[float]] = mapped_column(Float)
+    filepath: Mapped[str] = mapped_column(String, nullable=False)
+    
+    __table_args__ = (
+        Index('idx_video_frames_video', 'video_id', 'frame_number'),
+    )
 
-            CREATE INDEX IF NOT EXISTS idx_video_frames_video
-                ON video_frames(video_id, frame_number);
+class AnnotationModel(Base):
+    __tablename__ = "annotations"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    image_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("images.id", ondelete="CASCADE"))
+    video_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("videos.id", ondelete="CASCADE"))
+    frame_number: Mapped[Optional[int]] = mapped_column(Integer)
+    label: Mapped[str] = mapped_column(String, default='unknown')
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    mask_rle: Mapped[Optional[str]] = mapped_column(String)
+    mask_polygon: Mapped[Optional[str]] = mapped_column(String)
+    bbox: Mapped[Optional[str]] = mapped_column(String)
+    area: Mapped[Optional[float]] = mapped_column(Float, default=0.0)
+    click_x: Mapped[Optional[int]] = mapped_column(Integer)
+    click_y: Mapped[Optional[int]] = mapped_column(Integer)
+    approved: Mapped[int] = mapped_column(Integer, default=0)
+    corrected: Mapped[int] = mapped_column(Integer, default=0)
+    track_id: Mapped[Optional[str]] = mapped_column(String)
+    average_depth: Mapped[Optional[float]] = mapped_column(Float)
+    created_at: Mapped[str] = mapped_column(String, default=_now)
+    
+    __table_args__ = (
+        Index('idx_annotations_image', 'image_id'),
+        Index('idx_annotations_video', 'video_id'),
+        Index('idx_annotations_track', 'track_id'),
+    )
 
-            CREATE TABLE IF NOT EXISTS annotations (
-                id            TEXT PRIMARY KEY,
-                image_id      TEXT,
-                video_id      TEXT,
-                frame_number  INTEGER,
-                label         TEXT NOT NULL DEFAULT 'unknown',
-                confidence    REAL NOT NULL DEFAULT 0.0,
-                mask_rle      TEXT,
-                mask_polygon  TEXT,
-                bbox          TEXT,
-                area          REAL DEFAULT 0.0,
-                click_x       INTEGER,
-                click_y       INTEGER,
-                approved      INTEGER NOT NULL DEFAULT 0,
-                corrected     INTEGER NOT NULL DEFAULT 0,
-                track_id      TEXT,
-                created_at    TEXT NOT NULL,
-                FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE,
-                FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE
-            );
 
-            CREATE INDEX IF NOT EXISTS idx_annotations_image
-                ON annotations(image_id);
-            CREATE INDEX IF NOT EXISTS idx_annotations_video
-                ON annotations(video_id);
-            CREATE INDEX IF NOT EXISTS idx_annotations_track
-                ON annotations(track_id);
-        """)
-        conn.commit()
-    finally:
-        conn.close()
+async def init_db() -> None:
+    async with engine.begin() as conn:
+        await conn.execute(text("PRAGMA journal_mode=WAL"))
+        await conn.execute(text("PRAGMA foreign_keys=ON"))
+        await conn.run_sync(Base.metadata.create_all)
 
+def row_to_dict(row) -> dict:
+    if row is None: return None
+    if getattr(row, '_mapping', None) is not None:
+        return dict(row._mapping)
+    return row
 
 # ===================================================================
 # IMAGES CRUD
 # ===================================================================
 
-def create_image(filename: str, filepath: str, width: int, height: int) -> dict:
-    conn = get_db()
-    try:
-        row = {
-            "id": _uuid(), "filename": filename, "filepath": filepath,
-            "width": width, "height": height, "uploaded_at": _now(),
-        }
-        conn.execute(
-            "INSERT INTO images (id,filename,filepath,width,height,uploaded_at) "
-            "VALUES (:id,:filename,:filepath,:width,:height,:uploaded_at)", row,
+async def create_image(filename: str, filepath: str, width: int, height: int) -> dict:
+    async with AsyncSessionLocal() as session:
+        obj = ImageModel(filename=filename, filepath=filepath, width=width, height=height)
+        session.add(obj)
+        await session.commit()
+        await session.refresh(obj)
+        return {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
+
+async def get_image(image_id: str) -> Optional[dict]:
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(ImageModel.__table__).where(ImageModel.id == image_id))
+        return row_to_dict(res.first())
+
+async def list_images() -> List[dict]:
+    async with AsyncSessionLocal() as session:
+        stmt = (
+            select(
+                ImageModel.__table__,
+                func.count(AnnotationModel.id).label("annotation_count")
+            )
+            .outerjoin(AnnotationModel, AnnotationModel.image_id == ImageModel.id)
+            .group_by(ImageModel.id)
+            .order_by(ImageModel.uploaded_at.desc())
         )
-        conn.commit()
-        return row
-    finally:
-        conn.close()
-
-
-def get_image(image_id: str) -> Optional[dict]:
-    conn = get_db()
-    try:
-        r = conn.execute("SELECT * FROM images WHERE id=?", (image_id,)).fetchone()
-        return dict(r) if r else None
-    finally:
-        conn.close()
-
-
-def list_images() -> list[dict]:
-    conn = get_db()
-    try:
-        return [dict(r) for r in conn.execute("""
-            SELECT i.*, COUNT(a.id) AS annotation_count
-            FROM images i
-            LEFT JOIN annotations a ON a.image_id = i.id
-            GROUP BY i.id
-            ORDER BY i.uploaded_at DESC
-        """).fetchall()]
-    finally:
-        conn.close()
-
+        res = await session.execute(stmt)
+        return [row_to_dict(r) for r in res.all()]
 
 # ===================================================================
 # VIDEOS CRUD
 # ===================================================================
 
-def create_video(
+async def create_video(
     filename: str, filepath: str,
     duration_seconds: float = 0, fps: float = 0,
     total_frames: int = 0, width: int = 0, height: int = 0,
 ) -> dict:
-    conn = get_db()
-    try:
-        row = {
-            "id": _uuid(), "filename": filename, "filepath": filepath,
-            "duration_seconds": duration_seconds, "fps": fps,
-            "total_frames": total_frames, "width": width, "height": height,
-            "uploaded_at": _now(),
-        }
-        conn.execute(
-            "INSERT INTO videos "
-            "(id,filename,filepath,duration_seconds,fps,total_frames,width,height,uploaded_at) "
-            "VALUES (:id,:filename,:filepath,:duration_seconds,:fps,:total_frames,:width,:height,:uploaded_at)",
-            row,
+    async with AsyncSessionLocal() as session:
+        obj = VideoModel(
+            filename=filename, filepath=filepath, duration_seconds=duration_seconds,
+            fps=fps, total_frames=total_frames, width=width, height=height
         )
-        conn.commit()
-        return row
-    finally:
-        conn.close()
+        session.add(obj)
+        await session.commit()
+        await session.refresh(obj)
+        return {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
 
+async def get_video(video_id: str) -> Optional[dict]:
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(VideoModel.__table__).where(VideoModel.id == video_id))
+        return row_to_dict(res.first())
 
-def get_video(video_id: str) -> Optional[dict]:
-    conn = get_db()
-    try:
-        r = conn.execute("SELECT * FROM videos WHERE id=?", (video_id,)).fetchone()
-        return dict(r) if r else None
-    finally:
-        conn.close()
-
-
-def list_videos() -> list[dict]:
-    conn = get_db()
-    try:
-        return [dict(r) for r in conn.execute(
-            "SELECT * FROM videos ORDER BY uploaded_at DESC"
-        ).fetchall()]
-    finally:
-        conn.close()
-
+async def list_videos() -> List[dict]:
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(VideoModel.__table__).order_by(VideoModel.uploaded_at.desc()))
+        return [row_to_dict(r) for r in res.all()]
 
 # ===================================================================
 # VIDEO FRAMES CRUD
 # ===================================================================
 
-def create_video_frame(
+async def create_video_frame(
     video_id: str, frame_number: int, timestamp_ms: float, filepath: str,
 ) -> dict:
-    conn = get_db()
-    try:
-        row = {
-            "id": _uuid(), "video_id": video_id,
-            "frame_number": frame_number, "timestamp_ms": timestamp_ms,
-            "filepath": filepath,
-        }
-        conn.execute(
-            "INSERT INTO video_frames (id,video_id,frame_number,timestamp_ms,filepath) "
-            "VALUES (:id,:video_id,:frame_number,:timestamp_ms,:filepath)", row,
+    async with AsyncSessionLocal() as session:
+        obj = VideoFrameModel(
+            video_id=video_id, frame_number=frame_number, timestamp_ms=timestamp_ms, filepath=filepath
         )
-        conn.commit()
-        return row
-    finally:
-        conn.close()
+        session.add(obj)
+        await session.commit()
+        await session.refresh(obj)
+        return {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
 
+async def create_video_frames_bulk(frames: List[dict]) -> None:
+    async with AsyncSessionLocal() as session:
+        for f in frames:
+            if 'id' not in f:
+                f['id'] = _uuid()
+        await session.execute(VideoFrameModel.__table__.insert(), frames)
+        await session.commit()
 
-def create_video_frames_bulk(frames: list[dict]) -> None:
-    """Insert many video frame records in a single transaction."""
-    conn = get_db()
-    try:
-        conn.executemany(
-            "INSERT INTO video_frames (id,video_id,frame_number,timestamp_ms,filepath) "
-            "VALUES (:id,:video_id,:frame_number,:timestamp_ms,:filepath)",
-            frames,
+async def get_video_frames(video_id: str) -> List[dict]:
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(
+            select(VideoFrameModel.__table__).where(VideoFrameModel.video_id == video_id)
+            .order_by(VideoFrameModel.frame_number)
         )
-        conn.commit()
-    finally:
-        conn.close()
+        return [row_to_dict(r) for r in res.all()]
 
-
-def get_video_frames(video_id: str) -> list[dict]:
-    conn = get_db()
-    try:
-        return [dict(r) for r in conn.execute(
-            "SELECT * FROM video_frames WHERE video_id=? ORDER BY frame_number",
-            (video_id,),
-        ).fetchall()]
-    finally:
-        conn.close()
-
-
-def get_video_frame(video_id: str, frame_number: int) -> Optional[dict]:
-    conn = get_db()
-    try:
-        r = conn.execute(
-            "SELECT * FROM video_frames WHERE video_id=? AND frame_number=?",
-            (video_id, frame_number),
-        ).fetchone()
-        return dict(r) if r else None
-    finally:
-        conn.close()
-
+async def get_video_frame(video_id: str, frame_number: int) -> Optional[dict]:
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(
+            select(VideoFrameModel.__table__)
+            .where(VideoFrameModel.video_id == video_id, VideoFrameModel.frame_number == frame_number)
+        )
+        return row_to_dict(res.first())
 
 # ===================================================================
 # ANNOTATIONS CRUD
 # ===================================================================
 
-def create_annotation(
+async def create_annotation(
     image_id: Optional[str] = None,
     video_id: Optional[str] = None,
     frame_number: Optional[int] = None,
@@ -283,154 +234,119 @@ def create_annotation(
     approved: bool = False,
     corrected: bool = False,
     track_id: Optional[str] = None,
+    average_depth: Optional[float] = None,
 ) -> dict:
-    conn = get_db()
-    try:
-        row = {
-            "id": _uuid(), "image_id": image_id, "video_id": video_id,
-            "frame_number": frame_number, "label": label,
-            "confidence": confidence, "mask_rle": mask_rle,
-            "mask_polygon": mask_polygon, "bbox": bbox, "area": area,
-            "click_x": click_x, "click_y": click_y,
-            "approved": int(approved), "corrected": int(corrected),
-            "track_id": track_id, "created_at": _now(),
-        }
-        conn.execute(
-            "INSERT INTO annotations "
-            "(id,image_id,video_id,frame_number,label,confidence,mask_rle,mask_polygon,"
-            "bbox,area,click_x,click_y,approved,corrected,track_id,created_at) "
-            "VALUES (:id,:image_id,:video_id,:frame_number,:label,:confidence,:mask_rle,"
-            ":mask_polygon,:bbox,:area,:click_x,:click_y,:approved,:corrected,:track_id,:created_at)",
-            row,
+    async with AsyncSessionLocal() as session:
+        obj = AnnotationModel(
+            image_id=image_id, video_id=video_id, frame_number=frame_number, label=label,
+            confidence=confidence, mask_rle=mask_rle, mask_polygon=mask_polygon, bbox=bbox,
+            area=area, click_x=click_x, click_y=click_y,
+            approved=int(approved), corrected=int(corrected),
+            track_id=track_id, average_depth=average_depth
         )
-        conn.commit()
-        return row
-    finally:
-        conn.close()
+        session.add(obj)
+        await session.commit()
+        await session.refresh(obj)
+        return {c.name: getattr(obj, c.name) for c in obj.__table__.columns}
 
+async def create_annotations_bulk(annotations: List[dict]) -> None:
+    async with AsyncSessionLocal() as session:
+        for a in annotations:
+            if 'approved' in a: a['approved'] = int(a['approved'])
+            if 'corrected' in a: a['corrected'] = int(a['corrected'])
+            if 'id' not in a: a['id'] = _uuid()
+            if 'created_at' not in a: a['created_at'] = _now()
+        await session.execute(AnnotationModel.__table__.insert(), annotations)
+        await session.commit()
 
-def create_annotations_bulk(annotations: list[dict]) -> None:
-    """Insert a batch of annotations in a single transaction (for video tracks)."""
-    conn = get_db()
-    try:
-        conn.executemany(
-            "INSERT INTO annotations "
-            "(id,image_id,video_id,frame_number,label,confidence,mask_rle,mask_polygon,"
-            "bbox,area,click_x,click_y,approved,corrected,track_id,created_at) "
-            "VALUES (:id,:image_id,:video_id,:frame_number,:label,:confidence,:mask_rle,"
-            ":mask_polygon,:bbox,:area,:click_x,:click_y,:approved,:corrected,:track_id,:created_at)",
-            annotations,
+async def get_annotation(ann_id: str) -> Optional[dict]:
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(AnnotationModel.__table__).where(AnnotationModel.id == ann_id))
+        return row_to_dict(res.first())
+
+async def get_annotations_for_image(image_id: str) -> List[dict]:
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(
+            select(AnnotationModel.__table__)
+            .where(AnnotationModel.image_id == image_id)
+            .order_by(AnnotationModel.created_at)
         )
-        conn.commit()
-    finally:
-        conn.close()
+        return [row_to_dict(r) for r in res.all()]
 
+async def get_annotations_for_video(video_id: str) -> List[dict]:
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(
+            select(AnnotationModel.__table__)
+            .where(AnnotationModel.video_id == video_id)
+            .order_by(AnnotationModel.track_id, AnnotationModel.frame_number)
+        )
+        return [row_to_dict(r) for r in res.all()]
 
-def get_annotation(ann_id: str) -> Optional[dict]:
-    conn = get_db()
-    try:
-        r = conn.execute("SELECT * FROM annotations WHERE id=?", (ann_id,)).fetchone()
-        return dict(r) if r else None
-    finally:
-        conn.close()
-
-
-def get_annotations_for_image(image_id: str) -> list[dict]:
-    conn = get_db()
-    try:
-        return [dict(r) for r in conn.execute(
-            "SELECT * FROM annotations WHERE image_id=? ORDER BY created_at",
-            (image_id,),
-        ).fetchall()]
-    finally:
-        conn.close()
-
-
-def get_annotations_for_video(video_id: str) -> list[dict]:
-    """Get all annotations for a video, ordered by track then frame."""
-    conn = get_db()
-    try:
-        return [dict(r) for r in conn.execute(
-            "SELECT * FROM annotations WHERE video_id=? "
-            "ORDER BY track_id, frame_number",
-            (video_id,),
-        ).fetchall()]
-    finally:
-        conn.close()
-
-
-def update_annotation(ann_id: str, **kwargs) -> Optional[dict]:
+async def update_annotation(ann_id: str, **kwargs) -> Optional[dict]:
     allowed = {
         "label", "confidence", "mask_rle", "mask_polygon",
-        "bbox", "area", "approved", "corrected",
+        "bbox", "area", "approved", "corrected", "average_depth",
     }
     updates = {k: v for k, v in kwargs.items() if k in allowed}
     if not updates:
-        return get_annotation(ann_id)
-
+        return await get_annotation(ann_id)
+    
     for key in ("approved", "corrected"):
         if key in updates:
             updates[key] = int(updates[key])
 
-    set_clause = ", ".join(f"{k}=?" for k in updates)
-    values = list(updates.values()) + [ann_id]
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            update(AnnotationModel).where(AnnotationModel.id == ann_id).values(**updates)
+        )
+        await session.commit()
+    return await get_annotation(ann_id)
 
-    conn = get_db()
-    try:
-        conn.execute(f"UPDATE annotations SET {set_clause} WHERE id=?", values)
-        conn.commit()
-        return get_annotation(ann_id)
-    finally:
-        conn.close()
+async def delete_annotation(ann_id: str) -> bool:
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(delete(AnnotationModel).where(AnnotationModel.id == ann_id))
+        await session.commit()
+        return res.rowcount > 0
 
+async def delete_annotations_by_track(track_id: str) -> int:
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(delete(AnnotationModel).where(AnnotationModel.track_id == track_id))
+        await session.commit()
+        return res.rowcount
 
-def delete_annotation(ann_id: str) -> bool:
-    conn = get_db()
-    try:
-        cur = conn.execute("DELETE FROM annotations WHERE id=?", (ann_id,))
-        conn.commit()
-        return cur.rowcount > 0
-    finally:
-        conn.close()
-
-
-def delete_annotations_by_track(track_id: str) -> int:
-    """Delete all annotations sharing a track_id. Returns count deleted."""
-    conn = get_db()
-    try:
-        cur = conn.execute("DELETE FROM annotations WHERE track_id=?", (track_id,))
-        conn.commit()
-        return cur.rowcount
-    finally:
-        conn.close()
-
-
-def get_approved_annotations() -> list[dict]:
-    """All approved annotations with image/video metadata for COCO export."""
-    conn = get_db()
-    try:
-        # Image annotations
-        img_anns = [dict(r) for r in conn.execute("""
-            SELECT a.*, i.filename AS img_filename, i.filepath AS img_filepath,
-                   i.width AS img_width, i.height AS img_height
-            FROM annotations a
-            JOIN images i ON a.image_id = i.id
-            WHERE a.approved = 1 AND a.image_id IS NOT NULL
-            ORDER BY a.image_id, a.created_at
-        """).fetchall()]
-
-        # Video frame annotations
-        vid_anns = [dict(r) for r in conn.execute("""
-            SELECT a.*, vf.filepath AS frame_filepath,
-                   v.width AS img_width, v.height AS img_height,
-                   v.filename AS vid_filename
-            FROM annotations a
-            JOIN videos v ON a.video_id = v.id
-            JOIN video_frames vf ON vf.video_id = a.video_id AND vf.frame_number = a.frame_number
-            WHERE a.approved = 1 AND a.video_id IS NOT NULL
-            ORDER BY a.video_id, a.track_id, a.frame_number
-        """).fetchall()]
-
+async def get_approved_annotations() -> List[dict]:
+    async with AsyncSessionLocal() as session:
+        # Images
+        stmt1 = (
+            select(
+                AnnotationModel.__table__,
+                ImageModel.filename.label("img_filename"),
+                ImageModel.filepath.label("img_filepath"),
+                ImageModel.width.label("img_width"),
+                ImageModel.height.label("img_height")
+            )
+            .join(ImageModel, AnnotationModel.image_id == ImageModel.id)
+            .where(AnnotationModel.approved == 1, AnnotationModel.image_id.isnot(None))
+            .order_by(AnnotationModel.image_id, AnnotationModel.created_at)
+        )
+        res1 = await session.execute(stmt1)
+        img_anns = [row_to_dict(r) for r in res1.all()]
+        
+        # Videos
+        stmt2 = (
+            select(
+                AnnotationModel.__table__,
+                VideoFrameModel.filepath.label("frame_filepath"),
+                VideoModel.width.label("img_width"),
+                VideoModel.height.label("img_height"),
+                VideoModel.filename.label("vid_filename")
+            )
+            .join(VideoModel, AnnotationModel.video_id == VideoModel.id)
+            .join(VideoFrameModel, (VideoFrameModel.video_id == AnnotationModel.video_id) & (VideoFrameModel.frame_number == AnnotationModel.frame_number))
+            .where(AnnotationModel.approved == 1, AnnotationModel.video_id.isnot(None))
+            .order_by(AnnotationModel.video_id, AnnotationModel.track_id, AnnotationModel.frame_number)
+        )
+        res2 = await session.execute(stmt2)
+        vid_anns = [row_to_dict(r) for r in res2.all()]
+        
         return img_anns + vid_anns
-    finally:
-        conn.close()

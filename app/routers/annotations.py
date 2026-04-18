@@ -25,7 +25,7 @@ router = APIRouter(prefix="/api", tags=["annotations"])
 @router.post("/annotations")
 async def create_new_annotation(data: AnnotationCreate):
     """Create a single annotation (image or single video frame)."""
-    record = create_annotation(
+    record = await create_annotation(
         image_id=data.image_id,
         video_id=data.video_id,
         frame_number=data.frame_number,
@@ -79,7 +79,7 @@ async def save_track_annotations(data: AnnotationTrackCreate):
         })
 
     if rows:
-        create_annotations_bulk(rows)
+        await create_annotations_bulk(rows)
 
     return {
         "status": "created",
@@ -95,14 +95,14 @@ async def save_track_annotations(data: AnnotationTrackCreate):
 @router.get("/annotations/image/{image_id}")
 async def get_image_annotations(image_id: str):
     """All annotations for an image."""
-    anns = get_annotations_for_image(image_id)
+    anns = await get_annotations_for_image(image_id)
     return {"annotations": anns, "count": len(anns)}
 
 
 @router.get("/annotations/video/{video_id}")
 async def get_video_annotations(video_id: str):
     """All annotations for a video grouped by track_id."""
-    anns = get_annotations_for_video(video_id)
+    anns = await get_annotations_for_video(video_id)
 
     # Group by track_id
     tracks = {}
@@ -120,7 +120,7 @@ async def get_video_annotations(video_id: str):
 @router.put("/annotations/{annotation_id}")
 async def update_existing_annotation(annotation_id: str, data: AnnotationUpdate):
     """Update label, confidence, approved, or corrected on an annotation."""
-    existing = get_annotation(annotation_id)
+    existing = await get_annotation(annotation_id)
     if not existing:
         raise HTTPException(404, "Annotation not found.")
 
@@ -134,14 +134,14 @@ async def update_existing_annotation(annotation_id: str, data: AnnotationUpdate)
     if data.corrected is not None:
         kwargs["corrected"] = data.corrected
 
-    updated = update_annotation(annotation_id, **kwargs)
+    updated = await update_annotation(annotation_id, **kwargs)
     return {"status": "updated", "annotation": updated}
 
 
 @router.delete("/annotations/{annotation_id}")
 async def delete_single_annotation(annotation_id: str):
     """Delete a single annotation."""
-    if not delete_annotation(annotation_id):
+    if not await delete_annotation(annotation_id):
         raise HTTPException(404, "Annotation not found.")
     return {"status": "deleted", "id": annotation_id}
 
@@ -149,7 +149,7 @@ async def delete_single_annotation(annotation_id: str):
 @router.delete("/annotations/track/{track_id}")
 async def delete_track_annotations(track_id: str):
     """Delete all annotations in a tracking session."""
-    count = delete_annotations_by_track(track_id)
+    count = await delete_annotations_by_track(track_id)
     if count == 0:
         raise HTTPException(404, "No annotations found for this track.")
     return {"status": "deleted", "track_id": track_id, "deleted_count": count}

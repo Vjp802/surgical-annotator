@@ -8,15 +8,25 @@ string given an image + a fixed prompt.  This means the fine-tuned model
 has the same interface as the original PaliGemma and no architecture
 changes are needed for export.
 
-Usage:
+Single-dataset usage (legacy):
     python finetune.py \\
         --coco_exports ../exports/*.json \\
         --images_dir ../uploads/images \\
-        --output_dir ./checkpoints \\
-        --epochs 10 \\
-        --batch_size 8 \\
-        --learning_rate 2e-5 \\
-        --model_id google/paligemma2-3b-pt-224
+        --output_dir ./checkpoints
+
+Multi-dataset usage with per-dataset weights:
+    python finetune.py \\
+        --datasets \\
+            ./datasets/dsad/annotations.json:./datasets/dsad/images:3.0 \\
+            ./exports/surgeon_corrections.json:./uploads/images:5.0 \\
+            ./datasets/cholec80/annotations.json:./datasets/cholec80/images:1.0 \\
+        --output_dir ./checkpoints
+
+Dataset weight guidance:
+    dsad:                 3.0  (colorectal-specific, expert labels)
+    surgeon_corrections:  5.0  (ground truth, highest priority)
+    cholec_seg8k:         1.0  (general surgical)
+    surgisr4k:            0.0  (no labels — skip)
 """
 
 import argparse
@@ -48,6 +58,202 @@ logger = logging.getLogger(__name__)
 PROMPT = "Identify the highlighted surgical organ. Answer with the organ name only:"
 
 MIN_CLASS_SAMPLES = 50  # warn but continue below this
+
+
+# ======================================================================
+# Weighted multi-dataset support
+# ======================================================================
+
+class WeightedSurgicalDataset(torch.utils.data.Dataset):
+    """
+    Combines multiple COCO JSON datasets with per-dataset sampling weights.
+
+    Higher weight → that dataset is sampled more frequently, which lets you
+    up-weight high-quality or domain-specific datasets (e.g. DSAD for
+    colorectal procedures) and down-weight noisier or less relevant ones.
+
+    Recommended weights for colorectal surgery fine-tuning:
+        dsad:                 3.0  (colorectal-specific, expert pixel labels)
+        surgeon_corrections:  5.0  (your own ground-truth annotations)
+        cholec_seg8k:         1.0  (general laparoscopic, lower priority)
+        surgisr4k:            0.0  (no labels — exclude)
+
+    How it works
+    ------------
+    Each dataset i has n_i samples and weight w_i.  The effective size of
+    the combined dataset is set to  sum(w_i * n_i) / max(w_i), i.e. the
+    "heaviest" dataset is fully traversed once per epoch and lighter ones
+    are proportionally sub-sampled.  Indices are drawn from a pre-built
+    probability table so PyTorch's default sequential / shuffle samplers
+    work without modification.
+    """
+
+    def __init__(
+        self,
+        dataset_configs: list[dict],
+        transform=None,
+    ):
+        """
+        Args:
+            dataset_configs: List of dicts, each with:
+                - coco_json_path (str): Path to COCO JSON file.
+                - images_dir     (str): Directory containing the images.
+                - weight       (float): Sampling weight for this dataset.
+                - name          (str):  Human-readable name for logging.
+            transform: Optional image transform applied after crop/overlay.
+        """
+        if not dataset_configs:
+            raise ValueError("dataset_configs must contain at least one entry.")
+
+        self.transform = transform
+        self._sub_datasets: list[SurgicalOrganDataset] = []
+        self._weights:      list[float]                = []
+        self._names:        list[str]                  = []
+
+        # ---- Load sub-datasets ----------------------------------------
+        for cfg in dataset_configs:
+            coco_json = cfg["coco_json_path"]
+            images_dir = cfg["images_dir"]
+            weight     = float(cfg.get("weight", 1.0))
+            name       = cfg.get("name", os.path.basename(coco_json))
+
+            if weight <= 0:
+                logger.info("Skipping dataset '%s' (weight=%.2f)", name, weight)
+                continue
+
+            logger.info(
+                "Loading dataset '%s' from %s (weight=%.2f)...",
+                name, coco_json, weight,
+            )
+            try:
+                ds = SurgicalOrganDataset([coco_json], images_dir)
+            except Exception as e:
+                logger.error("Failed to load '%s': %s — skipping.", name, e)
+                continue
+
+            self._sub_datasets.append(ds)
+            self._weights.append(weight)
+            self._names.append(name)
+
+            from collections import Counter
+            counts = Counter(s["label_name"] for s in ds.samples)
+            logger.info(
+                "  '%s': %d samples, %d classes",
+                name, len(ds), len(ds.label_to_id),
+            )
+            for lbl, cnt in sorted(counts.items(), key=lambda x: -x[1]):
+                logger.info("    %-22s %4d", lbl, cnt)
+
+        if not self._sub_datasets:
+            raise ValueError(
+                "No valid sub-datasets loaded. Check your dataset_configs."
+            )
+
+        # ---- Build unified label → id mapping -------------------------
+        all_labels = sorted({
+            lbl
+            for ds in self._sub_datasets
+            for lbl in ds.label_to_id
+        })
+        self.label_to_id: dict[str, int] = {lbl: i for i, lbl in enumerate(all_labels)}
+        self.id_to_label: dict[int, str] = {i: lbl for lbl, i in self.label_to_id.items()}
+
+        # Patch each sub-dataset's label mapping to use the unified ids
+        for ds in self._sub_datasets:
+            ds.label_to_id = self.label_to_id
+            ds.id_to_label = self.id_to_label
+            for s in ds.samples:
+                # Ensure every sample's label_name is in the unified map
+                if s["label_name"] not in self.label_to_id:
+                    s["label_name"] = "unknown"
+
+        # ---- Build weighted index table --------------------------------
+        # Effective length = max_w dataset fully traversed once,
+        # others sub-sampled proportionally.
+        max_w = max(self._weights)
+        self._index_table: list[tuple[int, int]] = []  # (ds_idx, sample_idx)
+
+        rng = np.random.default_rng(42)
+        for ds_i, (ds, w) in enumerate(zip(self._sub_datasets, self._weights)):
+            ratio      = w / max_w                      # fraction of this ds to include
+            n_take     = max(1, round(len(ds) * ratio))
+            chosen_idx = rng.choice(len(ds), size=n_take, replace=n_take > len(ds))
+            for s_idx in chosen_idx:
+                self._index_table.append((ds_i, int(s_idx)))
+
+        rng.shuffle(self._index_table)  # mix datasets
+
+        logger.info(
+            "WeightedSurgicalDataset: %d effective samples from %d dataset(s), %d classes",
+            len(self._index_table),
+            len(self._sub_datasets),
+            len(self.label_to_id),
+        )
+
+    # ------------------------------------------------------------------
+    def __len__(self) -> int:
+        return len(self._index_table)
+
+    def __getitem__(self, idx: int) -> dict:
+        ds_i, s_i = self._index_table[idx]
+        item = self._sub_datasets[ds_i][s_i]
+        if self.transform is not None:
+            item["image"] = self.transform(item["image"])
+        return item
+
+    # ------------------------------------------------------------------
+    def get_class_weights(self) -> torch.Tensor:
+        """
+        Inverse-frequency class weights across ALL sub-datasets combined,
+        accounting for the effective sampling weight of each dataset.
+
+        Returns a 1-D tensor of shape (n_classes,) for use with
+        CrossEntropyLoss(weight=...).
+        """
+        from collections import Counter
+        max_w = max(self._weights)
+        combined_counts: Counter = Counter()
+
+        for ds, w in zip(self._sub_datasets, self._weights):
+            ratio = w / max_w
+            counts = Counter(s["label_name"] for s in ds.samples)
+            for lbl, cnt in counts.items():
+                combined_counts[lbl] += cnt * ratio
+
+        total   = sum(combined_counts.values())
+        n_cls   = len(self.label_to_id)
+        weights = torch.zeros(n_cls)
+        for lbl, lbl_id in self.label_to_id.items():
+            cnt = combined_counts.get(lbl, 1)
+            weights[lbl_id] = total / (n_cls * max(cnt, 1))
+        return weights
+
+    def split(
+        self,
+        train_ratio: float = 0.8,
+        val_ratio:   float = 0.1,
+        test_ratio:  float = 0.1,
+        seed: int = 42,
+    ):
+        """
+        Random split of the index table into train / val / test subsets.
+        Returns three torch.utils.data.Subset objects.
+        """
+        from torch.utils.data import Subset
+        from sklearn.model_selection import train_test_split
+        assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6
+        indices = list(range(len(self)))
+        train_idx, temp_idx = train_test_split(
+            indices, test_size=1 - train_ratio, random_state=seed
+        )
+        val_idx, test_idx = train_test_split(
+            temp_idx, test_size=0.5, random_state=seed
+        )
+        logger.info(
+            "Split: %d train / %d val / %d test",
+            len(train_idx), len(val_idx), len(test_idx),
+        )
+        return Subset(self, train_idx), Subset(self, val_idx), Subset(self, test_idx)
 
 
 # ======================================================================
@@ -187,20 +393,54 @@ def evaluate(model, processor, loader, accelerator, organ_list: list[str]) -> di
 # Training
 # ======================================================================
 
+def _parse_dataset_config(spec: str) -> dict:
+    """
+    Parse a dataset spec string in the form:
+        path/to/coco.json:path/to/images[:weight]
+
+    Weight defaults to 1.0 if omitted.
+    """
+    parts = spec.split(":")
+    if len(parts) < 2:
+        raise ValueError(
+            f"Invalid dataset spec '{spec}'. "
+            "Expected format: coco.json:images_dir[:weight]"
+        )
+    coco_json  = parts[0]
+    images_dir = parts[1]
+    weight     = float(parts[2]) if len(parts) >= 3 else 1.0
+    return {
+        "coco_json_path": coco_json,
+        "images_dir":     images_dir,
+        "weight":         weight,
+        "name":           os.path.basename(os.path.dirname(coco_json)) or os.path.basename(coco_json),
+    }
+
+
 def train(args):
     accelerator = Accelerator(mixed_precision="bf16" if args.bf16 else "no")
     logger.info("Device: %s | Mixed precision: %s", accelerator.device, accelerator.mixed_precision)
 
     # --- Dataset ---
-    coco_paths = []
-    for pattern in args.coco_exports:
-        coco_paths.extend(glob.glob(pattern))
-    if not coco_paths:
-        logger.error("No COCO export files found: %s", args.coco_exports)
-        sys.exit(1)
-    logger.info("Loading %d COCO export file(s)...", len(coco_paths))
+    # Prefer --datasets (multi-dataset with weights) over legacy --coco_exports
+    if getattr(args, "datasets", None):
+        logger.info("Building WeightedSurgicalDataset from %d spec(s)...", len(args.datasets))
+        dataset_configs = [_parse_dataset_config(spec) for spec in args.datasets]
+        dataset = WeightedSurgicalDataset(dataset_configs)
+    else:
+        # Legacy: single images_dir, flat weight=1.0 per export file
+        coco_paths = []
+        for pattern in (args.coco_exports or []):
+            coco_paths.extend(glob.glob(pattern))
+        if not coco_paths:
+            logger.error(
+                "No COCO export files found. "
+                "Provide --datasets or --coco_exports."
+            )
+            sys.exit(1)
+        logger.info("Loading %d COCO export file(s) (legacy mode)...", len(coco_paths))
+        dataset = SurgicalOrganDataset(coco_paths, args.images_dir)
 
-    dataset = SurgicalOrganDataset(coco_paths, args.images_dir)
     organ_list = list(dataset.label_to_id.keys())
 
     train_set, val_set, _ = dataset.split(
@@ -382,25 +622,70 @@ def train(args):
 # ======================================================================
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Fine-tune PaliGemma 2 for organ classification")
-    p.add_argument("--coco_exports",   nargs="+", required=True,
-                   help="Glob pattern(s) for COCO JSON export files")
-    p.add_argument("--images_dir",     required=True,
-                   help="Directory containing uploaded images (uploads/images/)")
-    p.add_argument("--output_dir",     default="./checkpoints")
-    p.add_argument("--model_id",       default="google/paligemma2-3b-pt-224")
-    p.add_argument("--epochs",         type=int,   default=10)
-    p.add_argument("--batch_size",     type=int,   default=8)
-    p.add_argument("--learning_rate",  type=float, default=2e-5)
-    p.add_argument("--lora_r",         type=int,   default=16)
-    p.add_argument("--lora_alpha",     type=int,   default=32)
-    p.add_argument("--lora_dropout",   type=float, default=0.05)
-    p.add_argument("--patience",       type=int,   default=3)
-    p.add_argument("--train_ratio",    type=float, default=0.8)
-    p.add_argument("--val_ratio",      type=float, default=0.1)
-    p.add_argument("--bf16",           action="store_true", default=True,
-                   help="Use bfloat16 mixed precision (recommended for MPS/A100)")
-    return p.parse_args()
+    p = argparse.ArgumentParser(
+        description="Fine-tune PaliGemma 2 for organ classification",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # ---- Multi-dataset inputs (preferred) ----
+    p.add_argument(
+        "--datasets",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "Space-separated list of dataset configs in the format: "
+            "path/to/coco.json:path/to/images[:weight]  "
+            "Example:  --datasets "
+            "./datasets/dsad/annotations.json:./datasets/dsad/images:3.0 "
+            "./exports/surgeon_corrections.json:./uploads/images:5.0"
+        ),
+    )
+
+    # ---- Legacy single-dataset inputs ----
+    p.add_argument(
+        "--coco_exports",
+        nargs="+",
+        default=None,
+        help="Legacy: glob pattern(s) for COCO JSON export files (weight=1.0 each)",
+    )
+    p.add_argument(
+        "--images_dir",
+        default=None,
+        help="Legacy: directory containing uploaded images (used with --coco_exports)",
+    )
+
+    # ---- General options ----
+    p.add_argument("--output_dir",    default="./checkpoints")
+    p.add_argument("--model_id",      default="google/paligemma2-3b-pt-224")
+    p.add_argument("--epochs",        type=int,   default=10)
+    p.add_argument("--batch_size",    type=int,   default=8)
+    p.add_argument("--learning_rate", type=float, default=2e-5)
+    p.add_argument("--lora_r",        type=int,   default=16)
+    p.add_argument("--lora_alpha",    type=int,   default=32)
+    p.add_argument("--lora_dropout",  type=float, default=0.05)
+    p.add_argument("--patience",      type=int,   default=3)
+    p.add_argument("--train_ratio",   type=float, default=0.8)
+    p.add_argument("--val_ratio",     type=float, default=0.1)
+    p.add_argument(
+        "--bf16",
+        action="store_true",
+        default=False,
+        help="Use bfloat16 mixed precision (recommended for A100/H100 and Apple MPS)",
+    )
+
+    args = p.parse_args()
+
+    # Validate: must supply either --datasets or --coco_exports
+    if not args.datasets and not args.coco_exports:
+        p.error(
+            "You must provide either --datasets or --coco_exports. "
+            "Run with -h for usage examples."
+        )
+    if args.coco_exports and not args.images_dir:
+        p.error("--images_dir is required when using --coco_exports.")
+
+    return args
 
 
 if __name__ == "__main__":

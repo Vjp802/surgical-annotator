@@ -134,13 +134,21 @@ identification will now use your fine-tuned model with no Ollama dependency.
 
 ---
 
-## Backend options
+## VLM Backend Comparison
 
-| `VLM_BACKEND` | Description |
-|---|---|
-| `"ollama"` | Default — calls local Ollama (gemma4:e4b) |
-| `"hf"` | HuggingFace Inference API (used on HF Spaces) |
-| `"finetuned"` | Local fine-tuned PaliGemma 2 (this pipeline) |
+| Backend       | Model              | Runs Locally | Best For |
+|---------------|--------------------|-------------|----------|
+| `ollama`      | Gemma 4 E4B        | ✅ Yes      | Default local dev |
+| `medgemma`    | MedGemma 1.5 4B    | ✅ Yes      | Medical image ID, best local option |
+| `finetuned`   | PaliGemma 2 + LoRA | ✅ Yes      | After training on your data |
+| `hf`          | Qwen2.5-VL-7B      | ❌ No       | HF Spaces deployment |
+| `robotics_er` | Gemini Robotics-ER 1.6 | ❌ No   | Best accuracy, cloud only |
+
+To activate MedGemma backend:
+```bash
+export VLM_BACKEND=medgemma
+uvicorn app.main:app --reload
+```
 
 ---
 

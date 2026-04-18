@@ -26,7 +26,7 @@ async def segment_image(req: SegmentImageRequest, request: Request):
     if not sam.is_ready():
         raise HTTPException(503, "SAM 2 model not loaded.")
 
-    record = get_image(req.image_id)
+    record = await get_image(req.image_id)
     if not record:
         raise HTTPException(404, "Image not found.")
 
@@ -39,8 +39,9 @@ async def segment_image(req: SegmentImageRequest, request: Request):
     if req.x >= w or req.y >= h:
         raise HTTPException(400, f"Click ({req.x},{req.y}) out of bounds ({w}x{h}).")
 
+    from starlette.concurrency import run_in_threadpool
     try:
-        result = sam.segment_image(img, req.x, req.y)
+        result = await run_in_threadpool(sam.segment_image, img, req.x, req.y)
     except Exception as e:
         raise HTTPException(500, f"Segmentation failed: {e}")
 
@@ -65,7 +66,7 @@ async def segment_video(req: SegmentVideoRequest, request: Request):
     if not sam.is_ready():
         raise HTTPException(503, "SAM 2 model not loaded.")
 
-    record = get_video(req.video_id)
+    record = await get_video(req.video_id)
     if not record:
         raise HTTPException(404, "Video not found.")
 
@@ -74,8 +75,10 @@ async def segment_video(req: SegmentVideoRequest, request: Request):
     if not Path(frames_dir).exists():
         raise HTTPException(404, "Frames directory not found. Was the video processed?")
 
+    from starlette.concurrency import run_in_threadpool
     try:
-        results = sam.segment_video(
+        results = await run_in_threadpool(
+            sam.segment_video,
             frames_dir=frames_dir,
             click_frame=req.frame_number,
             x=req.x,

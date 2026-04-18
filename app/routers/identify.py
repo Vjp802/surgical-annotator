@@ -21,10 +21,11 @@ async def identify_organ(req: IdentifyRequest, request: Request):
     Accepts image_id OR (video_id + frame_number), plus mask_rle.
     """
     vlm = request.app.state.vlm_service
+    depth_service = request.app.state.depth_service
 
     # Load the right image
     if req.image_id:
-        record = get_image(req.image_id)
+        record = await get_image(req.image_id)
         if not record:
             raise HTTPException(404, "Image not found.")
         try:
@@ -33,7 +34,7 @@ async def identify_organ(req: IdentifyRequest, request: Request):
             raise HTTPException(500, f"Failed to load image: {e}")
 
     elif req.video_id is not None and req.frame_number is not None:
-        frame = get_video_frame(req.video_id, req.frame_number)
+        frame = await get_video_frame(req.video_id, req.frame_number)
         if not frame:
             raise HTTPException(404, "Video frame not found.")
         try:
@@ -53,6 +54,15 @@ async def identify_organ(req: IdentifyRequest, request: Request):
     except Exception as e:
         raise HTTPException(400, f"Invalid mask RLE: {e}")
 
-    result = vlm.identify_organ(image_np, mask)
+    from starlette.concurrency import run_in_threadpool
+    result = await run_in_threadpool(vlm.identify_organ, image_np, mask)
 
-    return IdentifyResponse(label=result["label"], confidence=result["confidence"])
+    # Optional Depth Extraction
+    avg_depth = await run_in_threadpool(depth_service.get_organ_average_depth, image_np, mask)
+
+    return IdentifyResponse(
+        label=result.get("label", "unknown"),
+        confidence=result.get("confidence", 0.0),
+        spatial_context=result.get("spatial_context"),
+        average_depth=avg_depth
+    )
