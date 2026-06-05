@@ -1,3 +1,4 @@
+import os
 """
 Fine-tune PaliGemma 2 for surgical organ classification.
 
@@ -271,21 +272,21 @@ def make_collate_fn(processor, organ_list: list[str], max_new_tokens: int = 8):
         label_names = [item["label_name"] for item in batch]
 
         # --- Encode inputs (image + prompt) ---
+        prompts = ["<image> " + PROMPT] * len(batch)
         inputs = processor(
             images=images,
-            text=[PROMPT] * len(batch),
+            text=prompts,
             return_tensors="pt",
             padding=True,
         )
 
         # --- Encode targets (organ name strings) ---
-        with processor.tokenizer.as_target_tokenizer():
-            targets = processor.tokenizer(
-                label_names,
-                return_tensors="pt",
-                padding=True,
-                add_special_tokens=False,
-            )
+        targets = processor.tokenizer(
+            label_names,
+            return_tensors="pt",
+            padding=True,
+            add_special_tokens=False,
+        )
 
         # Build labels: -100 for all input positions, then answer tokens
         input_len  = inputs["input_ids"].shape[1]
@@ -311,10 +312,19 @@ def make_collate_fn(processor, organ_list: list[str], max_new_tokens: int = 8):
             [inputs["attention_mask"], targets["attention_mask"]], dim=1
         )
 
+        token_type_ids = None
+        if "token_type_ids" in inputs:
+            answer_type_ids = torch.ones(
+                len(batch), targets["input_ids"].shape[1], dtype=torch.long
+            )
+            token_type_ids = torch.cat(
+                [inputs["token_type_ids"], answer_type_ids], dim=1
+            )
         return {
             "input_ids":        full_input_ids,
             "attention_mask":   full_attn_mask,
             "pixel_values":     inputs["pixel_values"],
+            "token_type_ids":   token_type_ids,
             "labels":           labels,
             "label_names":      label_names,
         }
@@ -326,7 +336,7 @@ def make_collate_fn(processor, organ_list: list[str], max_new_tokens: int = 8):
 # ======================================================================
 
 @torch.no_grad()
-def evaluate(model, processor, loader, accelerator, organ_list: list[str]) -> dict:
+def evaluate_model(model, processor, loader, accelerator, organ_list: list[str]) -> dict:
     """
     Greedy-decode predictions and compute accuracy.
     Uses constrained generation: pick the organ whose first token has the
@@ -461,11 +471,11 @@ def train(args):
     )
 
     # Freeze vision tower — only fine-tune the language model layers with LoRA
-    for param in model.vision_tower.parameters():
+    for name, param in model.named_parameters():
+        if any(k in name for k in ['vision_tower', 'image_encoder', 'vision_model']):
+            param.requires_grad = False
+    for param in model.model.multi_modal_projector.parameters():
         param.requires_grad = False
-    for param in model.multi_modal_projector.parameters():
-        param.requires_grad = False
-
     # LoRA on language model attention layers
     lora_config = LoraConfig(
         r=args.lora_r,
@@ -476,6 +486,8 @@ def train(args):
         task_type=TaskType.CAUSAL_LM,
     )
     model = get_peft_model(model, lora_config)
+    model.gradient_checkpointing_enable()
+    model.enable_input_require_grads()
     model.print_trainable_parameters()
 
     # --- Class weights for loss ---
@@ -546,6 +558,7 @@ def train(args):
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"],
                 pixel_values=batch["pixel_values"],
+                token_type_ids=batch.get("token_type_ids"),
                 labels=batch["labels"],
             )
             loss = outputs.loss
@@ -563,7 +576,7 @@ def train(args):
 
         # Validation
         from PIL import Image
-        val_metrics = evaluate(model, processor, val_loader, accelerator, organ_list)
+        val_metrics = evaluate_model(model, processor, val_loader, accelerator, organ_list)
         val_acc = val_metrics["accuracy"]
 
         logger.info(
@@ -606,7 +619,7 @@ def train(args):
     logger.info("Training complete. Best val accuracy: %.3f", best_val_acc)
     logger.info("=" * 60)
 
-    val_metrics = evaluate(model, processor, val_loader, accelerator, organ_list)
+    val_metrics = evaluate_model(model, processor, val_loader, accelerator, organ_list)
     logger.info("Final val accuracy: %.3f", val_metrics["accuracy"])
     logger.info("Per-class accuracy:")
     for cls, acc in sorted(val_metrics["per_class"].items()):
