@@ -410,15 +410,28 @@ def _parse_dataset_config(spec: str) -> dict:
 
     Weight defaults to 1.0 if omitted.
     """
-    parts = spec.split(":")
+    parts = spec.rsplit(":", 2)
     if len(parts) < 2:
         raise ValueError(
             f"Invalid dataset spec '{spec}'. "
             "Expected format: coco.json:images_dir[:weight]"
         )
-    coco_json  = parts[0]
-    images_dir = parts[1]
-    weight     = float(parts[2]) if len(parts) >= 3 else 1.0
+
+    # Try parsing the last part as a float weight. If it fails, the weight was omitted.
+    if len(parts) == 3:
+        try:
+            weight = float(parts[2])
+            coco_json = parts[0]
+            images_dir = parts[1]
+        except ValueError:
+            coco_json = parts[0]
+            images_dir = parts[1] + ":" + parts[2]
+            weight = 1.0
+    else:
+        coco_json = parts[0]
+        images_dir = parts[1]
+        weight = 1.0
+
     return {
         "coco_json_path": coco_json,
         "images_dir":     images_dir,
@@ -451,6 +464,22 @@ def train(args):
         logger.info("Loading %d COCO export file(s) (legacy mode)...", len(coco_paths))
         dataset = SurgicalOrganDataset(coco_paths, args.images_dir)
 
+    # --- Sample dataset if max_samples > 0 ---
+    if args.max_samples > 0:
+        logger.info("Randomly sampling %d samples from the dataset...", args.max_samples)
+        import random
+        rng_seed = 42
+        if isinstance(dataset, WeightedSurgicalDataset):
+            if len(dataset._index_table) > args.max_samples:
+                random.seed(rng_seed)
+                dataset._index_table = random.sample(dataset._index_table, args.max_samples)
+                logger.info("Dataset size reduced to %d effective samples", len(dataset._index_table))
+        elif isinstance(dataset, SurgicalOrganDataset):
+            if len(dataset.samples) > args.max_samples:
+                random.seed(rng_seed)
+                dataset.samples = random.sample(dataset.samples, args.max_samples)
+                logger.info("Dataset size reduced to %d samples", len(dataset.samples))
+
     organ_list = list(dataset.label_to_id.keys())
 
     train_set, val_set, _ = dataset.split(
@@ -477,15 +506,21 @@ def train(args):
     for param in model.model.multi_modal_projector.parameters():
         param.requires_grad = False
     # LoRA on language model attention layers
-    lora_config = LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        target_modules=["q_proj", "v_proj"],
-        lora_dropout=args.lora_dropout,
-        bias="none",
-        task_type=TaskType.CAUSAL_LM,
-    )
-    model = get_peft_model(model, lora_config)
+    if args.resume_from_checkpoint:
+        logger.info("Resuming LoRA weights from checkpoint: %s", args.resume_from_checkpoint)
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, args.resume_from_checkpoint, is_trainable=True)
+    else:
+        lora_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            target_modules=["q_proj", "v_proj"],
+            lora_dropout=args.lora_dropout,
+            bias="none",
+            task_type=TaskType.CAUSAL_LM,
+        )
+        model = get_peft_model(model, lora_config)
+
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
     model.print_trainable_parameters()
@@ -685,6 +720,18 @@ def parse_args():
         action="store_true",
         default=False,
         help="Use bfloat16 mixed precision (recommended for A100/H100 and Apple MPS)",
+    )
+    p.add_argument(
+        "--max_samples",
+        type=int,
+        default=0,
+        help="If > 0, randomly sample that many items from the dataset before training. 0 means use all.",
+    )
+    p.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help="If provided, load LoRA weights from that checkpoint path and continue training from there rather than starting fresh.",
     )
 
     args = p.parse_args()
